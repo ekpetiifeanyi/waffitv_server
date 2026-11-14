@@ -1,142 +1,253 @@
-// server.js
-const express = require('express');
-const cors = require('cors');
-const webpush = require('web-push');
-const dotenv = require('dotenv');
-const bodyParser = require('body-parser');
-const { Pool } = require('pg');
-
+const express = require("express");
+const cors = require("cors");
+const webpush = require("web-push");
+const dotenv = require("dotenv");
+const { Pool } = require("pg");
 dotenv.config();
-
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json({ limit: "32kb" }));
 
+// ALLOWED WEBSITE ORIGINS
 const allowedOrigins = [
-  'https://waffitv.com',
-  'https://www.waffitv.com',
-  'http://waffitv.com',
-  'http://www.waffitv.com',
+    "https://waffitv.com",
+    "https://www.waffitv.com"
 ];
+
 app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) === -1) {
-      return callback(new Error('CORS policy: Origin not allowed.'), false);
+    origin: function (origin, callback) {
+        if (!origin) return callback(null, true);
+        if (!allowedOrigins.includes(origin)) {
+            return callback(new Error("Origin not allowed"));
+        }
+        callback(null, true);
     }
-    return callback(null, true);
-  },
-  credentials: true
 }));
 
-// DATABASE (PostgreSQL)
+// POSTGRESQL DATABASE
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
 });
 
-// Create table for storing push subscriptions
-(async function initDB() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS push_subscriptions_waffitv (
-        id SERIAL PRIMARY KEY,
-        endpoint TEXT UNIQUE NOT NULL,
-        p256dh TEXT,
-        auth TEXT
-      );
-    `);
-    console.log('PostgreSQL table ready');
-  }
-  catch (err) {
-    console.error('Database initialization failed:', err);
-  }
-})();
-
-// VAPID KEYS CONFIGURATION
+// VAPID CONFIGURATION
 const vapidPublicKey = process.env.VAPID_PUBLIC_KEY;
 const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY;
+const adminSecret = process.env.PUSH_ADMIN_SECRET;
 
-if (!vapidPublicKey || !vapidPrivateKey) {
-  console.error('Missing VAPID_PUBLIC_KEY or VAPID_PRIVATE_KEY in environment variables.');
-  process.exit(1);
+if (!vapidPublicKey || !vapidPrivateKey || !adminSecret) {
+    console.error("Missing required environment variables.");
+    process.exit(1);
 }
 
-webpush.setVapidDetails('mailto:support@waffitv.com', vapidPublicKey, vapidPrivateKey);
+webpush.setVapidDetails(
+    "mailto:support@waffitv.com",
+    vapidPublicKey,
+    vapidPrivateKey
+);
 
-// ROUTES
-app.get('/vapid-public-key', (req, res) => {
-  res.type('text/plain').send(vapidPublicKey);
+// INITIALIZE DATABASE
+async function initDB() {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS push_subscriptions_waffitv (
+            id SERIAL PRIMARY KEY,
+            endpoint TEXT UNIQUE NOT NULL,
+            p256dh TEXT NOT NULL,
+            auth TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+    `);
+    console.log("PostgreSQL table ready");
+}
+
+// AUTHENTICATION FOR ADMIN ROUTES
+function authenticateAdmin(req, res, next) {
+    const authorization = req.headers.authorization;
+    if (authorization !== `Bearer ${adminSecret}`) {
+        return res.status(401).json({
+            success: false,
+            message: "Unauthorized"
+        });
+    }
+    next();
+}
+
+// VALIDATE NOTIFICATION URL
+function getSafeUrl(value) {
+    try {
+        const url = new URL(value || "https://www.waffitv.com");
+        const allowedHosts = [
+            "waffitv.com",
+            "www.waffitv.com"
+        ];
+
+        if (url.protocol !== "https:" || !allowedHosts.includes(url.hostname)) {
+            return "https://www.waffitv.com";
+        }
+        return url.href;
+    } catch {
+        return "https://www.waffitv.com";
+    }
+}
+
+// PUBLIC ROUTES
+// Get VAPID public key
+app.get("/vapid-public-key", (req, res) => {
+    res.type("text/plain").send(vapidPublicKey);
 });
 
-// Save a new push subscription
-app.post('/subscribe', async (req, res) => {
-  const subscription = req.body;
-  if (!subscription || !subscription.endpoint || !subscription.keys) {
-    return res.status(400).json({ error: 'Invalid subscription data' });
-  }
-
-  try {
-    await pool.query(
-      `INSERT INTO push_subscriptions_waffitv (endpoint, p256dh, auth)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (endpoint) DO UPDATE
-       SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`,
-      [subscription.endpoint, subscription.keys.p256dh, subscription.keys.auth]
-    );
-    console.log('Subscription saved:', subscription.endpoint);
-    res.status(201).json({ message: 'Subscription saved successfully' });
-  }
-  catch (err) {
-    console.error('Error saving subscription:', err);
-    res.status(500).json({ error: 'Database error' });
-  }
-});
-
-// Send to ALL subscribers
-app.post("/notify-all", async (req, res) => {
-  const { title, body, url } = req.body;
-  const payload = JSON.stringify({
-    title: title || "WAFFITV News Update",
-    body: body || "Stay informed with WAFFITV",
-    url: url || "https://www.waffitv.com",
-  });
-
-  try {
-    const { rows } = await pool.query("SELECT * FROM push_subscriptions_waffitv");
-    if (rows.length === 0) {
-      return res.status(404).json({ message: "No subscribers found" });
+// Save browser subscription
+app.post("/subscribe", async (req, res) => {
+    const subscription = req.body;
+    if (
+        !subscription ||
+        typeof subscription.endpoint !== "string" ||
+        !subscription.keys ||
+        typeof subscription.keys.p256dh !== "string" ||
+        typeof subscription.keys.auth !== "string"
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: "Invalid subscription data"
+        });
     }
 
-    console.log(`Sending push to ${rows.length} subscribers...`);
-    const results = await Promise.allSettled(
-      rows.map(sub => {
-        const subscription = {
-          endpoint: sub.endpoint,
-          keys: { p256dh: sub.p256dh, auth: sub.auth },
-        };
-        return webpush.sendNotification(subscription, payload);
-      })
-    );
+    try {
+        await pool.query(
+            `INSERT INTO push_subscriptions_waffitv
+                (endpoint, p256dh, auth)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (endpoint)
+             DO UPDATE SET
+                p256dh = EXCLUDED.p256dh,
+                auth = EXCLUDED.auth`,
+            [
+                subscription.endpoint,
+                subscription.keys.p256dh,
+                subscription.keys.auth
+            ]
+        );
 
-    let sent = 0;
-    for (const result of results) {
-      if (result.status === "fulfilled") sent++;
-      if (result.reason?.statusCode === 410) {
-        const endpoint = result.reason?.body?.endpoint;
-        await pool.query("DELETE FROM push_subscriptions_waffitv WHERE endpoint = $1", [endpoint]);
-      }
+        console.log("Subscription saved");
+
+        res.status(201).json({
+            success: true,
+            message: "Subscription saved successfully"
+        });
+
+    } catch (error) {
+        console.error("Subscription error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Could not save subscription"
+        });
     }
-    res.json({ success: true, totalSent: sent });
-  }
-  catch (err) {
-    console.error("Broadcast error:", err);
-    res.status(500).json({ error: "Failed to send to all" });
-  }
 });
 
-// Health route
-app.get("/", (_, res) => res.send("Waffitv Push Server Running"));
+// ADMIN ROUTE: SEND NOTIFICATION TO ALL SUBSCRIBERS
+app.post("/notify-all", authenticateAdmin, async (req, res) => {
+    const {
+        title,
+        body,
+        url,
+        tag
+    } = req.body;
 
-// --- START SERVER ---
+    const payload = JSON.stringify({
+        title: title || "WAFFITV News Update",
+        body: body || "Stay informed with WAFFITV",
+        url: getSafeUrl(url),
+        tag: tag || `waffitv-${Date.now()}`
+    });
+
+    try {
+        const { rows } = await pool.query("SELECT endpoint, p256dh, auth FROM push_subscriptions_waffitv");
+        if (rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "No subscribers found"
+            });
+        }
+        console.log(`Sending to ${rows.length} subscribers`);
+
+        const results = await Promise.allSettled(
+            rows.map(async (subscriber) => {
+                const subscription = {
+                    endpoint: subscriber.endpoint,
+                    keys: {
+                        p256dh: subscriber.p256dh,
+                        auth: subscriber.auth
+                    }
+                };
+
+                await webpush.sendNotification(subscription, payload);
+                return subscriber.endpoint;
+            })
+        );
+
+        let sent = 0;
+        let failed = 0;
+        let removed = 0;
+
+        const deleteEndpoints = [];
+
+        results.forEach((result, index) => {
+            if (result.status === "fulfilled") {
+                sent++;
+            }
+            else {
+                failed++;
+                const statusCode = result.reason?.statusCode;
+                // Expired or invalid subscriptions
+                if (statusCode === 404 || statusCode === 410) {
+                    deleteEndpoints.push(rows[index].endpoint);
+                }
+                console.error("Push delivery failed:", statusCode || result.reason?.message
+                );
+            }
+        });
+        // Remove expired subscriptions
+        if (deleteEndpoints.length > 0) {
+            const deletion = await pool.query(
+                `DELETE FROM push_subscriptions_waffitv
+                 WHERE endpoint = ANY($1::text[])`,
+                [deleteEndpoints]
+            );
+            removed = deletion.rowCount;
+        }
+        res.json({
+            success: true,
+            totalSubscribers: rows.length,
+            sent,
+            failed,
+            removed
+        });
+    } catch (error) {
+        console.error("Broadcast error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Notification broadcast failed"
+        });
+    }
+});
+
+// HEALTH CHECK
+app.get("/health", (req, res) => {
+    res.send("WAFFITV Push Server Running");
+});
+
+// START SERVER AFTER DATABASE INITIALIZATION
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+
+async function startServer() {
+    try {
+        await initDB();
+        app.listen(PORT, () => {
+            console.log(`WAFFITV Push Server running on port ${PORT}`);
+        });
+    } catch (error) {
+        console.error("Server initialization failed:", error);
+        process.exit(1);
+    }
+}
+
+startServer();
