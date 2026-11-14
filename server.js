@@ -73,6 +73,17 @@ async function initDB() {
     console.log("PostgreSQL table ready");
 }
 
+// keep database alive (safe ping)
+async function keepDatabaseAlive() {
+    try {
+        await pool.query("SELECT 1");
+        console.log("DB alive:", new Date().toISOString());
+    }
+    catch (err) {
+        console.error("Keep alive failed:", err.message);
+    }
+}
+
 // AUTHENTICATION FOR ADMIN ROUTES
 function authenticateAdmin(req, res, next) {
     const authorization = req.headers.authorization;
@@ -264,6 +275,7 @@ async function startServer() {
             console.log(`WAFFITV Push Server Listening on http://${HOST}:${PORT}`);
             keepServerAlive(`${BASE_URL}/health`);
         });
+        setInterval(keepDatabaseAlive, 5 * 60 * 1000);
     } catch (error) {
         console.error("Server initialization failed:", error);
         process.exit(1);
