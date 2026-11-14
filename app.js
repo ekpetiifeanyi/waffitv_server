@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const webpush = require("web-push");
+const { keepServerAlive } = require("./utils/keep-server");
 const dotenv = require("dotenv");
 const { Pool } = require("pg");
 dotenv.config();
@@ -88,6 +89,14 @@ function getSafeUrl(value) {
         return "https://www.waffitv.com";
     }
 }
+
+// HEALTH CHECK
+app.get("/health", (req, res) => {
+    res.json({
+        success: true,
+        timestamp: new Date().toISOString()
+    });
+});
 
 // PUBLIC ROUTES
 // Get VAPID public key
@@ -230,19 +239,16 @@ app.post("/notify-all", authenticateAdmin, async (req, res) => {
     }
 });
 
-// HEALTH CHECK
-app.get("/health", (req, res) => {
-    res.send("WAFFITV Push Server Running");
-});
-
 // START SERVER AFTER DATABASE INITIALIZATION
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3000;
+const BASE_URL = "https://waffitv.onrender.com";
 
 async function startServer() {
     try {
         await initDB();
         app.listen(PORT, () => {
             console.log(`WAFFITV Push Server running on port ${PORT}`);
+            keepServerAlive(`${BASE_URL}/health`);
         });
     } catch (error) {
         console.error("Server initialization failed:", error);
