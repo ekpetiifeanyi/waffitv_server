@@ -241,7 +241,7 @@ app.post("/notify-all", authenticateAdmin, async (req, res) => {
 
 // START SERVER AFTER DATABASE INITIALIZATION
 const PORT = process.env.PORT;
-const PORT = process.env.HOST;
+const HOST = process.env.HOST;
 const BASE_URL = "https://waffitv.onrender.com";
 
 async function startServer() {
