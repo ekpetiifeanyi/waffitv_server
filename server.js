@@ -25,10 +25,23 @@ app.use(cors({
 }));
 
 // POSTGRESQL DATABASE
+
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    host: process.env.PGHOST,
+    port: Number(process.env.PGPORT),
+    database: process.env.PGDATABASE,
+    user: process.env.PGUSER,
+    password: process.env.PGPASSWORD,
+
+    ssl: {
+        rejectUnauthorized: true,
+        ca: process.env.PG_CA_CERT.replace(/\\n/g, "\n")
+    },
+    connectionTimeoutMillis: 15000,
+    idleTimeoutMillis: 30000,
+    max: 10
 });
+
 
 // VAPID CONFIGURATION
 const vapidPublicKey = process.env.VAPID_PUBLIC_KEY;
