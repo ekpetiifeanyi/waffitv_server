@@ -240,14 +240,15 @@ app.post("/notify-all", authenticateAdmin, async (req, res) => {
 });
 
 // START SERVER AFTER DATABASE INITIALIZATION
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT;
+const PORT = process.env.HOST;
 const BASE_URL = "https://waffitv.onrender.com";
 
 async function startServer() {
     try {
         await initDB();
-        app.listen(PORT, () => {
-            console.log(`WAFFITV Push Server running on port ${PORT}`);
+        app.listen(PORT, HOST, () => {
+            console.log(`WAFFITV Push Server Listening on http://${HOST}:${PORT}`);
             keepServerAlive(`${BASE_URL}/health`);
         });
     } catch (error) {
